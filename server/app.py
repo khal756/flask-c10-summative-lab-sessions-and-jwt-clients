@@ -1,5 +1,6 @@
 from flask import Flask, jsonify, request
 from extensions import db, migrate, bcrypt, jwt
+from flask_jwt_extended import create_access_token
 
 app = Flask(__name__)
 app.config ["SQLALCHEMY_DATABASE_URI"]="sqlite:///catchup.db"
@@ -38,5 +39,29 @@ def register_user():
    db.session.commit()
    return jsonify({"success": "you have successfully registered"}), 201
 
+@app.route("/api/login", methods=["POST"])
+def login_user():
+   data = request.get_json() or {}
+
+   username = data.get("username")
+   password = data.get("password")
+
+   missing_user = User.query.filter_by(username=username).first()
+   if not missing_user:
+      return jsonify({"error": "User does not exist"}), 401
+   
+   if not bcrypt.check_password_hash(
+      missing_user.password_hash,
+      password
+   ):
+      return jsonify({"error": "Invalid username or password"}), 401
+
+   access_token = create_access_token(identity=str(missing_user.id))
+   return jsonify({
+      "access_token": access_token,
+      "message": "successfully logged in"
+   }), 200
+      
+   
 if __name__ == "__main__":
   app.run(debug=True)
