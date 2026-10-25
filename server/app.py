@@ -1,6 +1,6 @@
 from flask import Flask, jsonify, request
 from extensions import db, migrate, bcrypt, jwt
-from flask_jwt_extended import create_access_token
+from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity
 
 app = Flask(__name__)
 app.config ["SQLALCHEMY_DATABASE_URI"]="sqlite:///catchup.db"
@@ -61,6 +61,16 @@ def login_user():
       "access_token": access_token,
       "message": "successfully logged in"
    }), 200
+
+@app.route("/api/me", methods=["GET"])
+@jwt_required()
+def get_current_user():
+   user_id = get_jwt_identity()
+   user=User.query.get(user_id)
+   return jsonify({
+      "id" : user.id,
+      "username" : user.username
+    })
       
    
 if __name__ == "__main__":
