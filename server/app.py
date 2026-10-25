@@ -129,6 +129,7 @@ def get_authenticated_user():
     return db.session.get(User, int(user_id))
 
 
+
 @app.route("/api/tasks", methods=["GET"])
 @jwt_required()
 def get_tasks():
@@ -137,9 +138,36 @@ def get_tasks():
     if not user:
         return jsonify({"error": "User not found"}), 404
 
-    tasks = Task.query.filter_by(user_id=user.id).all()
-    return jsonify([task_to_dict(task) for task in tasks]), 200
+    try:
+        page = max(1, request.args.get("page", 1, type=int))
+        per_page = request.args.get("per_page", 10, type=int)
 
+        if per_page is None or per_page < 1:
+            return jsonify({"error": "per_page must be a positive integer"}), 400
+
+        per_page = min(per_page, 100)
+
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid pagination parameters"}), 400
+
+    pagination = (
+        Task.query
+        .filter_by(user_id=user.id)
+        .order_by(Task.id)
+        .paginate(page=page, per_page=per_page, error_out=False)
+    )
+
+    return jsonify({
+        "tasks": [task_to_dict(task) for task in pagination.items],
+        "pagination": {
+            "page": pagination.page,
+            "per_page": pagination.per_page,
+            "total_items": pagination.total,
+            "total_pages": pagination.pages,
+            "has_next": pagination.has_next,
+            "has_previous": pagination.has_prev
+        }
+    }), 200
 
 @app.route("/api/tasks", methods=["POST"])
 @jwt_required()
