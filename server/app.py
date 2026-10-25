@@ -1,12 +1,14 @@
 from flask import Flask, jsonify
-from extensions import db, migrate
+from extensions import db, migrate, bcrypt, jwt
 
 app = Flask(__name__)
 app.config ["SQLALCHEMY_DATABASE_URI"]="sqlite:///catchup.db"
+app.config["JWT_SECRET_KEY"] = "my-development-secret-change-later"
 
 db.init_app(app)
-
 migrate.init_app(app, db)
+bcrypt.init_app(app)
+jwt.init_app(app)
 
 from models import User
 
