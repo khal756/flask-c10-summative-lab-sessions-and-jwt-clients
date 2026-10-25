@@ -1,15 +1,16 @@
 
+from datetime import date, datetime
+
 from flask import Flask, jsonify, request
-from extensions import db, migrate, bcrypt, jwt
 from flask_jwt_extended import (
     create_access_token,
-    jwt_required,
     get_jwt_identity,
+    jwt_required,
 )
 
-from models import User, Task
-from datetime import date
-from models import StudyAvailability, PlanItem
+from extensions import db, migrate, bcrypt, jwt
+from models import User, Task, StudyAvailability, PlanItem
+
 
 app = Flask(__name__)
 
@@ -23,17 +24,32 @@ bcrypt.init_app(app)
 jwt.init_app(app)
 
 
+# --------------------------------------------------
+# HOME
+# --------------------------------------------------
+
 @app.route("/", methods=["GET"])
 def test_app():
     return jsonify({"message": "CatchUp API is running"}), 200
 
 
+# --------------------------------------------------
+# AUTHENTICATION: SIGNUP / REGISTER
+# --------------------------------------------------
+
+@app.route("/signup", methods=["POST"])
 @app.route("/api/register", methods=["POST"])
 def register_user():
     data = request.get_json(silent=True) or {}
 
     username = data.get("username")
     password = data.get("password")
+    is_frontend = request.path == "/signup"
+
+    if is_frontend and data.get("password_confirmation") != password:
+        return jsonify({
+            "errors": ["Password confirmation does not match"]
+        }), 400
 
     if (
         not isinstance(username, str)
@@ -41,6 +57,11 @@ def register_user():
         or not isinstance(password, str)
         or not password.strip()
     ):
+        if is_frontend:
+            return jsonify({
+                "errors": ["Username and password are required"]
+            }), 400
+
         return jsonify({
             "error": "Username and password are required"
         }), 400
@@ -50,6 +71,11 @@ def register_user():
     existing_user = User.query.filter_by(username=username).first()
 
     if existing_user:
+        if is_frontend:
+            return jsonify({
+                "errors": ["Username already exists"]
+            }), 409
+
         return jsonify({"error": "Username already exists"}), 409
 
     hashed_password = bcrypt.generate_password_hash(password).decode("utf-8")
@@ -62,19 +88,41 @@ def register_user():
     db.session.add(new_user)
     db.session.commit()
 
+    if is_frontend:
+        access_token = create_access_token(identity=str(new_user.id))
+
+        return jsonify({
+            "token": access_token,
+            "user": {
+                "id": new_user.id,
+                "username": new_user.username,
+            },
+        }), 201
+
     return jsonify({
         "success": "You have successfully registered"
     }), 201
 
 
+# --------------------------------------------------
+# AUTHENTICATION: LOGIN
+# --------------------------------------------------
+
+@app.route("/login", methods=["POST"])
 @app.route("/api/login", methods=["POST"])
 def login_user():
     data = request.get_json(silent=True) or {}
 
     username = data.get("username")
     password = data.get("password")
+    is_frontend = request.path == "/login"
 
     if not isinstance(username, str) or not isinstance(password, str):
+        if is_frontend:
+            return jsonify({
+                "errors": ["Username and password are required"]
+            }), 400
+
         return jsonify({
             "error": "Username and password are required"
         }), 400
@@ -84,11 +132,25 @@ def login_user():
     if not user or not bcrypt.check_password_hash(
         user.password_hash, password
     ):
+        if is_frontend:
+            return jsonify({
+                "errors": ["Invalid username or password"]
+            }), 401
+
         return jsonify({
             "error": "Invalid username or password"
         }), 401
 
     access_token = create_access_token(identity=str(user.id))
+
+    if is_frontend:
+        return jsonify({
+            "token": access_token,
+            "user": {
+                "id": user.id,
+                "username": user.username,
+            },
+        }), 200
 
     return jsonify({
         "access_token": access_token,
@@ -96,6 +158,11 @@ def login_user():
     }), 200
 
 
+# --------------------------------------------------
+# AUTHENTICATION: CURRENT USER
+# --------------------------------------------------
+
+@app.route("/me", methods=["GET"])
 @app.route("/api/me", methods=["GET"])
 @jwt_required()
 def get_current_user():
@@ -110,6 +177,10 @@ def get_current_user():
         "username": user.username,
     }), 200
 
+
+# --------------------------------------------------
+# HELPERS
+# --------------------------------------------------
 
 def task_to_dict(task):
     return {
@@ -129,6 +200,19 @@ def get_authenticated_user():
     return db.session.get(User, int(user_id))
 
 
+def parse_date(value):
+    if not isinstance(value, str):
+        return None
+
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+# --------------------------------------------------
+# TASKS: LIST WITH PAGINATION
+# --------------------------------------------------
 
 @app.route("/api/tasks", methods=["GET"])
 @jwt_required()
@@ -138,17 +222,18 @@ def get_tasks():
     if not user:
         return jsonify({"error": "User not found"}), 404
 
-    try:
-        page = max(1, request.args.get("page", 1, type=int))
-        per_page = request.args.get("per_page", 10, type=int)
+    page = request.args.get("page", 1, type=int)
+    per_page = request.args.get("per_page", 10, type=int)
 
-        if per_page is None or per_page < 1:
-            return jsonify({"error": "per_page must be a positive integer"}), 400
+    if page is None or page < 1:
+        return jsonify({"error": "page must be a positive integer"}), 400
 
-        per_page = min(per_page, 100)
+    if per_page is None or per_page < 1:
+        return jsonify({
+            "error": "per_page must be a positive integer"
+        }), 400
 
-    except (TypeError, ValueError):
-        return jsonify({"error": "Invalid pagination parameters"}), 400
+    per_page = min(per_page, 100)
 
     pagination = (
         Task.query
@@ -165,9 +250,14 @@ def get_tasks():
             "total_items": pagination.total,
             "total_pages": pagination.pages,
             "has_next": pagination.has_next,
-            "has_previous": pagination.has_prev
-        }
+            "has_previous": pagination.has_prev,
+        },
     }), 200
+
+
+# --------------------------------------------------
+# TASKS: CREATE
+# --------------------------------------------------
 
 @app.route("/api/tasks", methods=["POST"])
 @jwt_required()
@@ -202,6 +292,9 @@ def create_task():
             "error": "estimated_minutes must be a positive integer"
         }), 400
 
+    if not isinstance(data["task_type"], str) or not data["task_type"].strip():
+        return jsonify({"error": "task_type must not be empty"}), 400
+
     allowed_priorities = {"low", "medium", "high"}
     allowed_statuses = {"pending", "in_progress", "completed"}
 
@@ -218,8 +311,6 @@ def create_task():
     deadline = None
 
     if data.get("deadline"):
-        from datetime import datetime
-
         try:
             deadline = datetime.fromisoformat(data["deadline"])
         except (ValueError, TypeError):
@@ -227,15 +318,22 @@ def create_task():
                 "error": "deadline must be a valid ISO date/time"
             }), 400
 
+    recording_url = data.get("recording_url")
+
+    if recording_url is not None and not isinstance(recording_url, str):
+        return jsonify({
+            "error": "recording_url must be a string or null"
+        }), 400
+
     task = Task(
         user_id=user.id,
         title=data["title"].strip(),
-        task_type=data["task_type"],
+        task_type=data["task_type"].strip(),
         estimated_minutes=data["estimated_minutes"],
         deadline=deadline,
         priority=data["priority"],
         status=data["status"],
-        recording_url=data.get("recording_url"),
+        recording_url=recording_url,
     )
 
     db.session.add(task)
@@ -243,6 +341,10 @@ def create_task():
 
     return jsonify(task_to_dict(task)), 201
 
+
+# --------------------------------------------------
+# TASKS: GET ONE
+# --------------------------------------------------
 
 @app.route("/api/tasks/<int:task_id>", methods=["GET"])
 @jwt_required()
@@ -253,7 +355,8 @@ def get_task(task_id):
         return jsonify({"error": "User not found"}), 404
 
     task = Task.query.filter_by(
-        id=task_id, user_id=user.id
+        id=task_id,
+        user_id=user.id,
     ).first()
 
     if not task:
@@ -261,6 +364,10 @@ def get_task(task_id):
 
     return jsonify(task_to_dict(task)), 200
 
+
+# --------------------------------------------------
+# TASKS: UPDATE
+# --------------------------------------------------
 
 @app.route("/api/tasks/<int:task_id>", methods=["PATCH"])
 @jwt_required()
@@ -271,7 +378,8 @@ def update_task(task_id):
         return jsonify({"error": "User not found"}), 404
 
     task = Task.query.filter_by(
-        id=task_id, user_id=user.id
+        id=task_id,
+        user_id=user.id,
     ).first()
 
     if not task:
@@ -306,16 +414,21 @@ def update_task(task_id):
         task.title = data["title"].strip()
 
     if "task_type" in data:
-        if not isinstance(data["task_type"], str) or not data["task_type"].strip():
+        if (
+            not isinstance(data["task_type"], str)
+            or not data["task_type"].strip()
+        ):
             return jsonify({"error": "task_type must not be empty"}), 400
         task.task_type = data["task_type"].strip()
 
     if "estimated_minutes" in data:
         minutes = data["estimated_minutes"]
+
         if type(minutes) is not int or minutes <= 0:
             return jsonify({
                 "error": "estimated_minutes must be a positive integer"
             }), 400
+
         task.estimated_minutes = minutes
 
     if "priority" in data:
@@ -323,6 +436,7 @@ def update_task(task_id):
             return jsonify({
                 "error": "priority must be low, medium, or high"
             }), 400
+
         task.priority = data["priority"]
 
     if "status" in data:
@@ -330,6 +444,7 @@ def update_task(task_id):
             return jsonify({
                 "error": "status must be pending, in_progress, or completed"
             }), 400
+
         task.status = data["status"]
 
     if "deadline" in data:
@@ -338,8 +453,6 @@ def update_task(task_id):
         elif not isinstance(data["deadline"], str):
             return jsonify({"error": "deadline must be a string"}), 400
         else:
-            from datetime import datetime
-
             try:
                 task.deadline = datetime.fromisoformat(data["deadline"])
             except ValueError:
@@ -348,16 +461,24 @@ def update_task(task_id):
                 }), 400
 
     if "recording_url" in data:
-        if data["recording_url"] is not None and not isinstance(
-            data["recording_url"], str
+        if (
+            data["recording_url"] is not None
+            and not isinstance(data["recording_url"], str)
         ):
-            return jsonify({"error": "recording_url must be a string or null"}), 400
+            return jsonify({
+                "error": "recording_url must be a string or null"
+            }), 400
+
         task.recording_url = data["recording_url"]
 
     db.session.commit()
 
     return jsonify(task_to_dict(task)), 200
 
+
+# --------------------------------------------------
+# TASKS: DELETE
+# --------------------------------------------------
 
 @app.route("/api/tasks/<int:task_id>", methods=["DELETE"])
 @jwt_required()
@@ -368,11 +489,18 @@ def delete_task(task_id):
         return jsonify({"error": "User not found"}), 404
 
     task = Task.query.filter_by(
-        id=task_id, user_id=user.id
+        id=task_id,
+        user_id=user.id,
     ).first()
 
     if not task:
         return jsonify({"error": "Task not found"}), 404
+
+    # Remove related plan items before deleting the task.
+    PlanItem.query.filter_by(
+        task_id=task.id,
+        user_id=user.id,
+    ).delete(synchronize_session=False)
 
     db.session.delete(task)
     db.session.commit()
@@ -380,15 +508,9 @@ def delete_task(task_id):
     return "", 204
 
 
-def parse_date(value):
-    if not isinstance(value, str):
-        return None
-
-    try:
-        return date.fromisoformat(value)
-    except ValueError:
-        return None
-
+# --------------------------------------------------
+# STUDY AVAILABILITY: LIST
+# --------------------------------------------------
 
 @app.route("/api/availability", methods=["GET"])
 @jwt_required()
@@ -396,7 +518,7 @@ def get_availability():
     user_id = int(get_jwt_identity())
 
     records = StudyAvailability.query.filter_by(
-        user_id=user_id
+        user_id=user_id,
     ).order_by(StudyAvailability.date).all()
 
     return jsonify([
@@ -408,6 +530,10 @@ def get_availability():
         for record in records
     ]), 200
 
+
+# --------------------------------------------------
+# STUDY AVAILABILITY: CREATE
+# --------------------------------------------------
 
 @app.route("/api/availability", methods=["POST"])
 @jwt_required()
@@ -454,13 +580,17 @@ def create_availability():
     }), 201
 
 
+# --------------------------------------------------
+# STUDY PLAN: LIST
+# --------------------------------------------------
+
 @app.route("/api/plan", methods=["GET"])
 @jwt_required()
 def get_study_plan():
     user_id = int(get_jwt_identity())
 
     items = PlanItem.query.filter_by(
-        user_id=user_id
+        user_id=user_id,
     ).order_by(
         PlanItem.plan_date,
         PlanItem.position,
@@ -477,6 +607,10 @@ def get_study_plan():
         for item in items
     ]), 200
 
+
+# --------------------------------------------------
+# STUDY PLAN: CREATE
+# --------------------------------------------------
 
 @app.route("/api/plan", methods=["POST"])
 @jwt_required()
@@ -530,7 +664,9 @@ def create_plan_item():
         plan_date=plan_date,
     ).all()
 
-    used_minutes = sum(item.planned_minutes for item in already_planned)
+    used_minutes = sum(
+        item.planned_minutes for item in already_planned
+    )
 
     if used_minutes + minutes > availability.available_minutes:
         return jsonify({
@@ -559,6 +695,10 @@ def create_plan_item():
     }), 201
 
 
+# --------------------------------------------------
+# STUDY PLAN: DELETE
+# --------------------------------------------------
+
 @app.route("/api/plan/<int:item_id>", methods=["DELETE"])
 @jwt_required()
 def delete_plan_item(item_id):
@@ -578,7 +718,9 @@ def delete_plan_item(item_id):
     return "", 204
 
 
-
+# --------------------------------------------------
+# RUN APPLICATION
+# --------------------------------------------------
 
 if __name__ == "__main__":
     app.run(debug=True)
